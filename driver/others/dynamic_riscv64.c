@@ -101,6 +101,12 @@ struct riscv_hwprobe {
 #define		RISCV_HWPROBE_EXT_ZVFH		(1 << 30)
 #define		RISCV_HWPROBE_EXT_ZVFBFWMA	(1ULL << 54)
 
+/* CPUID keys (Linux >= 6.4).  Used to identify specific scalar
+ * microarchitectures such as the SiFive U74, which the RVV/VLEN probe below
+ * cannot distinguish from a generic core. */
+#define RISCV_HWPROBE_KEY_MVENDORID	0
+#define RISCV_HWPROBE_KEY_MARCHID	1
+
 #ifndef NR_riscv_hwprobe
 #ifndef NR_arch_specific_syscall
 #define NR_arch_specific_syscall 244
@@ -119,20 +125,65 @@ extern gotoblas_t gotoblas_RISCV64_ZVL256B;
 #if !defined(DYNAMIC_LIST) || defined(DYN_RISCV64_ZVL128B)
 extern gotoblas_t gotoblas_RISCV64_ZVL128B;
 #endif
+#if !defined(DYNAMIC_LIST) || defined(DYN_U74)
+extern gotoblas_t gotoblas_U74;
+#endif
 
 #define CPU_GENERIC         0
 #define CPU_RISCV64_ZVL256B 1
 #define CPU_RISCV64_ZVL128B 2
+#define CPU_RISCV64_U74     3
 
 static char *cpuname[] = {
 	"riscv64_generic",
 	"riscv64_zvl256b",
-	"riscv64_zvl128b"
+	"riscv64_zvl128b",
+	"riscv64_u74"
 };
 #define NUM_CORETYPES (sizeof(cpuname)/sizeof(char*))
 
 extern int openblas_verbose(void);
 extern void openblas_warning(int verbose, const char* msg);
+
+#if defined(OS_LINUX) && (!defined(DYNAMIC_LIST) || defined(DYN_U74))
+#define SIFIVE_MVENDORID	0x489
+#define SIFIVE_U74_MARCHID	0x8000000000000007ULL
+
+/* SiFive U74 (StarFive JH7110 / VisionFive 2, SiFive FU740): a scalar RV64GC
+ * core with a dedicated GEMM kernel and no vector unit, so the RVV/VLEN probe
+ * in get_coretype() cannot tell it from a generic core.  Match its vendor and
+ * architecture ids via hwprobe (Linux >= 6.4); the vendor id is required
+ * because some other cores share the U7 marchid but not SiFive's mvendorid.
+ * On older kernels fall back to the /proc/cpuinfo "uarch" line, which the
+ * kernel fills from the device-tree cpu "compatible" (e.g. "sifive,u74-mc"). */
+static int detect_riscv64_sifive_u74(void) {
+	struct riscv_hwprobe pairs[] = {
+		{ .key = RISCV_HWPROBE_KEY_MVENDORID, },
+		{ .key = RISCV_HWPROBE_KEY_MARCHID, },
+	};
+
+	if (syscall(NR_riscv_hwprobe, pairs, 2, 0, NULL, 0) == 0
+	    && pairs[0].key == RISCV_HWPROBE_KEY_MVENDORID
+	    && pairs[1].key == RISCV_HWPROBE_KEY_MARCHID)
+		return pairs[0].value == SIFIVE_MVENDORID
+		    && pairs[1].value == SIFIVE_U74_MARCHID;
+
+	FILE *fp = fopen("/proc/cpuinfo", "r");
+	if (fp) {
+		char buffer[512];
+		int is_u74 = 0;
+		while (fgets(buffer, sizeof(buffer), fp))
+			if (!strncmp(buffer, "uarch", 5) && strstr(buffer, "sifive,u74")) {
+				is_u74 = 1;
+				break;
+			}
+		fclose(fp);
+		return is_u74;
+	}
+
+	return 0;
+}
+#endif
 
 char* gotoblas_corename(void) {
 #if !defined(DYNAMIC_LIST) || defined(DYN_RISCV64_ZVL256B)
@@ -142,6 +193,10 @@ char* gotoblas_corename(void) {
 #if !defined(DYNAMIC_LIST) || defined(DYN_RISCV64_ZVL128B)
 	if (gotoblas == &gotoblas_RISCV64_ZVL128B)
 		return cpuname[CPU_RISCV64_ZVL128B];
+#endif
+#if !defined(DYNAMIC_LIST) || defined(DYN_U74)
+	if (gotoblas == &gotoblas_U74)
+		return cpuname[CPU_RISCV64_U74];
 #endif
 	if (gotoblas == &gotoblas_RISCV64_GENERIC)
 		return cpuname[CPU_GENERIC];
@@ -157,6 +212,11 @@ static gotoblas_t* get_coretype(void) {
 #if !defined(OS_LINUX)
 	return NULL;
 #else
+
+#if !defined(DYNAMIC_LIST) || defined(DYN_U74)
+	if (detect_riscv64_sifive_u74())
+		return &gotoblas_U74;
+#endif
 
 	/*
 	 * See the hwprobe documentation
@@ -245,6 +305,16 @@ static gotoblas_t* force_coretype(char* coretype) {
 #else
 		openblas_warning(1,
 				 "riscv64_zvl128b support not compiled in\n");
+		return NULL;
+#endif
+	}
+
+	if (i == CPU_RISCV64_U74) {
+#if !defined(DYNAMIC_LIST) || defined(DYN_U74)
+		return &gotoblas_U74;
+#else
+		openblas_warning(1,
+				 "riscv64_u74 support not compiled in\n");
 		return NULL;
 #endif
 	}
